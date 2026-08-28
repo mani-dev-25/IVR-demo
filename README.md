@@ -46,7 +46,7 @@ python -m venv .venv
 # Windows PowerShell
 .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-uvicorn main:app --reload --port 8000
+uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
 ### Frontend
@@ -54,10 +54,10 @@ uvicorn main:app --reload --port 8000
 ```bash
 cd frontend
 npm install
-npm run dev
+npm run dev -- --host 0.0.0.0
 ```
 
-Open the Vite URL, normally `http://localhost:5173`.
+Open the Vite URL, normally `http://localhost:5173` on the PC. For mobile testing on the same Wi-Fi, open the PC's LAN address such as `http://192.168.x.x:5173`. The app automatically uses the same LAN hostname on port `8000` for the FastAPI backend, so it no longer tries to call `localhost` from the phone.
 
 ## Tamil voice
 
@@ -70,3 +70,15 @@ The backend uses the Microsoft neural Tamil voice `ta-IN-PallaviNeural`. Interne
 ## Real telephone integration
 
 For an actual phone number, the same state machine can be connected to an Indian telephony provider such as Exotel or Knowlarity. The provider would receive DTMF digits from the caller, call the backend/webhooks, and play generated audio to the phone. The browser keypad is only the demonstration layer; it is intentionally shaped like a real IVR flow so it can be replaced by telephony webhooks later.
+
+
+## Bug fixes in this version
+
+- Speech playback now uses cancellation generations, preventing a delayed old-language audio request from starting after Tamil/English/Hindi selection or call disconnect.
+- The three language announcements are strictly serialized, so they cannot overlap or jump to another language.
+- Mobile testing no longer points the browser at the phone's own `localhost`; the API host follows the current LAN hostname.
+- Fixed the Tamil location-list runtime typo that used `taNumber` instead of `tamilNumber`.
+- If a farmer has no booking, pressing `1` from the booking/queue result now correctly opens slot selection as the prompt promises.
+- Rapid keypad presses are capped safely at six Farmer-ID digits.
+- Repeated neural TTS requests are cached in the backend to reduce interaction delay.
+- UI/CSS layout has not been changed.

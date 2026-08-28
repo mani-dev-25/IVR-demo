@@ -30,8 +30,8 @@ app.add_middleware(
 
 SLOT_TIMES = ["09:00 AM", "10:30 AM", "12:00 PM", "02:00 PM"]
 MAX_TTS_CHARS = 1800
-
-
+TTS_CACHE: dict[tuple[str, str], bytes] = {}
+TTS_CACHE_MAX = 64
 
 
 # ---------- neural TTS ----------
@@ -52,6 +52,15 @@ async def text_to_speech(
     if not voice:
         raise HTTPException(status_code=400, detail="Unsupported language")
 
+    cache_key = (lang, text.strip())
+    cached = TTS_CACHE.get(cache_key)
+    if cached:
+        return Response(
+            content=cached,
+            media_type="audio/mpeg",
+            headers={"Cache-Control": "public, max-age=3600"},
+        )
+
     try:
         communicate = edge_tts.Communicate(
             text=text.strip(),
@@ -69,8 +78,12 @@ async def text_to_speech(
         if not audio:
             raise RuntimeError("TTS provider returned no audio")
 
+        audio_bytes = bytes(audio)
+        if len(TTS_CACHE) >= TTS_CACHE_MAX:
+            TTS_CACHE.pop(next(iter(TTS_CACHE)))
+        TTS_CACHE[cache_key] = audio_bytes
         return Response(
-            content=bytes(audio),
+            content=audio_bytes,
             media_type="audio/mpeg",
             headers={
                 "Cache-Control": "public, max-age=3600",
@@ -81,7 +94,7 @@ async def text_to_speech(
         print(f"TTS error: {exc}")
         raise HTTPException(
             status_code=502,
-            detail="Tamil neural voice generation failed. Check internet connectivity.",
+            detail="Neural voice generation failed. Check internet connectivity.",
         )
 
 

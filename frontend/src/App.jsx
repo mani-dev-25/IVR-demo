@@ -1,7 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { P, LANG_PROMPT_EN, LANG_PROMPT_HI, LANG_PROMPT_TA } from "./prompts.js";
 
-const API = "http://localhost:8000/api";
+const API = `${window.location.protocol}//${window.location.hostname}:8000/api`;
 const KEYS = [["1", ""], ["2", "ABC"], ["3", "DEF"], ["4", "GHI"], ["5", "JKL"], ["6", "MNO"], ["7", "PQRS"], ["8", "TUV"], ["9", "WXYZ"], ["*", "CLEAR"], ["0", ""], ["#", "ENTER"]];
 
 const MOCK_DB = {
@@ -43,13 +43,14 @@ const DTMF = {
 let audioContext = null;
 let currentAudio = null;
 let currentUtterance = null;
+let speechGeneration = 0;
 
 function audioCtx() {
   if (!audioContext) {
     const Ctx = window.AudioContext || window.webkitAudioContext;
     if (Ctx) audioContext = new Ctx();
   }
-  if (audioContext?.state === "suspended") audioContext.resume();
+  if (audioContext?.state === "suspended") audioContext.resume().catch(() => {});
   return audioContext;
 }
 
@@ -82,29 +83,57 @@ function tone(key, special = false) {
   } catch (_) {}
 }
 
+// Every speech request gets a generation id. This prevents an old Hindi/Tamil/
+// English request from starting after the caller has already selected a language
+// or disconnected the call.
 function stopSpeech() {
+  speechGeneration += 1;
   try { window.speechSynthesis?.cancel(); } catch (_) {}
   if (currentAudio) {
-    try { currentAudio.pause(); currentAudio.currentTime = 0; } catch (_) {}
+    try {
+      currentAudio.onended = null;
+      currentAudio.onerror = null;
+      currentAudio.pause();
+      currentAudio.currentTime = 0;
+      currentAudio.removeAttribute("src");
+      currentAudio.load();
+    } catch (_) {}
     currentAudio = null;
+  }
+  if (currentUtterance) {
+    currentUtterance.onend = null;
+    currentUtterance.onerror = null;
   }
   currentUtterance = null;
 }
 
-function remoteSpeak(text, lang, done, status) {
+function remoteSpeak(text, lang, done, status, generation) {
   const clean = String(text).replace(/<[^>]+>/g, "").trim();
   const url = `${API}/tts?lang=${encodeURIComponent(lang)}&text=${encodeURIComponent(clean)}`;
-  const audio = new Audio(url);
+  const audio = new Audio();
   currentAudio = audio;
   audio.preload = "auto";
   audio.volume = 1;
-  if (status) status(lang === "ta-IN" ? "Tamil neural voice" : lang === "hi-IN" ? "Hindi neural voice" : "English neural voice");
-  audio.onended = () => { if (currentAudio === audio) currentAudio = null; done?.(); };
-  audio.onerror = () => { if (currentAudio === audio) currentAudio = null; done?.(new Error("remote tts failed")); };
-  return audio.play().catch(err => { if (currentAudio === audio) currentAudio = null; throw err; });
+  if (status && generation === speechGeneration) {
+    status(lang === "ta-IN" ? "Tamil neural voice" : lang === "hi-IN" ? "Hindi neural voice" : "English neural voice");
+  }
+  const finish = (err) => {
+    if (generation !== speechGeneration) return;
+    if (currentAudio === audio) currentAudio = null;
+    done?.(err);
+  };
+  audio.onended = () => finish();
+  audio.onerror = () => finish(new Error("remote tts failed"));
+  audio.src = url;
+  return audio.play().catch(err => {
+    if (generation !== speechGeneration) return Promise.reject(err);
+    if (currentAudio === audio) currentAudio = null;
+    throw err;
+  });
 }
 
-function nativeSpeak(text, lang, done, status) {
+function nativeSpeak(text, lang, done, status, generation) {
+  if (generation !== speechGeneration) return;
   if (!window.speechSynthesis) throw new Error("Speech synthesis unavailable");
   const voices = window.speechSynthesis.getVoices();
   const prefix = lang.slice(0, 2).toLowerCase();
@@ -116,8 +145,16 @@ function nativeSpeak(text, lang, done, status) {
   u.pitch = 1;
   u.volume = 1;
   currentUtterance = u;
-  u.onend = () => { currentUtterance = null; done?.(); };
-  u.onerror = () => { currentUtterance = null; done?.(new Error("native tts failed")); };
+  u.onend = () => {
+    if (generation !== speechGeneration) return;
+    currentUtterance = null;
+    done?.();
+  };
+  u.onerror = () => {
+    if (generation !== speechGeneration) return;
+    currentUtterance = null;
+    done?.(new Error("native tts failed"));
+  };
   status?.(prefix === "ta" ? "Tamil browser fallback" : prefix === "hi" ? "Hindi browser fallback" : "English browser fallback");
   window.speechSynthesis.resume();
   window.speechSynthesis.speak(u);
@@ -125,9 +162,16 @@ function nativeSpeak(text, lang, done, status) {
 
 function speak(text, lang, status, done) {
   stopSpeech();
-  return remoteSpeak(text, lang, done, status).catch(() => {
-    try { nativeSpeak(text, lang, done, status); }
-    catch (_) { status?.("Voice unavailable"); done?.(new Error("all tts failed")); }
+  const generation = speechGeneration;
+  return remoteSpeak(text, lang, done, status, generation).catch(() => {
+    if (generation !== speechGeneration) return;
+    try { nativeSpeak(text, lang, done, status, generation); }
+    catch (_) {
+      if (generation === speechGeneration) {
+        status?.("Voice unavailable");
+        done?.(new Error("all tts failed"));
+      }
+    }
   });
 }
 
@@ -200,6 +244,7 @@ export default function App() {
   const startCall = () => {
     if (state !== "IDLE") return;
     tone("CALL", true);
+    clearTimeout(promptTimer.current);
     stopSpeech();
     session.current = { lang: null, farmerId: "", farmer: null, locations: [] };
     setLog([]);
@@ -208,18 +253,20 @@ export default function App() {
     setBackendOnline(null);
     setFlow("LANG_SELECT");
     logMessage("system", "CALL CONNECTED — keypad IVR session started.");
-    // Play all three language choices in their own native neural voice.
-    speak(LANG_PROMPT_TA, "ta-IN", setSoundStatus, () => {
-      promptTimer.current = setTimeout(() => {
+
+    // Strictly serialize the three language announcements. A cancelled
+    // announcement can no longer resume and speak in the wrong language.
+    const playNext = (text, code, next) => {
+      speak(text, code, setSoundStatus, () => {
         if (stateRef.current !== "LANG_SELECT") return;
-        speak(LANG_PROMPT_EN, "en-IN", setSoundStatus, () => {
-          promptTimer.current = setTimeout(() => {
-            if (stateRef.current !== "LANG_SELECT") return;
-            speak(LANG_PROMPT_HI, "hi-IN", setSoundStatus);
-          }, 220);
-        });
-      }, 220);
-    });
+        if (next) next();
+      });
+    };
+    playNext(LANG_PROMPT_TA, "ta-IN", () =>
+      playNext(LANG_PROMPT_EN, "en-IN", () =>
+        playNext(LANG_PROMPT_HI, "hi-IN")
+      )
+    );
   };
 
   useEffect(() => {
@@ -353,7 +400,7 @@ export default function App() {
     if (current === "ID_ENTRY") {
       if (key === "*") { setBuffer(""); return; }
       if (key === "#" || key === "OK") return submitFarmerId();
-      if (/^\d$/.test(key) && buffer.length < 6) setBuffer(v => v + key);
+      if (/^\d$/.test(key)) setBuffer(v => v.length < 6 ? v + key : v);
       return;
     }
 
@@ -379,7 +426,13 @@ export default function App() {
 
     if (["BOOKING_DONE", "PREVIEW", "QUEUE"].includes(current)) {
       if (key === "9") return goMainMenu();
-      if (key === "1" && current === "PREVIEW" && !MOCK_DB.bookings[session.current.farmerId]) return loadLocations();
+      // When the caller has no booking, the prompt explicitly says 1 = book.
+      // Accept it from both Preview and Queue states instead of returning
+      // "invalid option".
+      if (key === "1") {
+        const hasBooking = !!MOCK_DB.bookings[session.current.farmerId];
+        if (!hasBooking && (current === "PREVIEW" || current === "QUEUE")) return loadLocations();
+      }
       return say(p.invalidKey);
     }
   }

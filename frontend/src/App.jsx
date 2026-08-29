@@ -6,12 +6,12 @@ const KEYS = [["1", ""], ["2", "ABC"], ["3", "DEF"], ["4", "GHI"], ["5", "JKL"],
 
 const MOCK_DB = {
   farmers: {
-    "101101": { name: "S. Murugan", district: "Thanjavur", lang: "ta" },
-    "101102": { name: "K. Lakshmi", district: "Thanjavur", lang: "ta" },
-    "202201": { name: "R. Suresh", district: "Coimbatore", lang: "en" },
-    "202202": { name: "Priya Anand", district: "Coimbatore", lang: "en" },
-    "303301": { name: "Suresh Kumar Yadav", district: "Meerut", lang: "hi" },
-    "303302": { name: "Anita Sharma", district: "Meerut", lang: "hi" },
+    "101101": { name: "S. Murugan", district: "Thanjavur", lang: "ta", phone: "9876543210" },
+    "101102": { name: "K. Lakshmi", district: "Thanjavur", lang: "ta", phone: "9876543211" },
+    "202201": { name: "R. Suresh", district: "Coimbatore", lang: "en", phone: "9876543212" },
+    "202202": { name: "Priya Anand", district: "Coimbatore", lang: "en", phone: "9876543213" },
+    "303301": { name: "Suresh Kumar Yadav", district: "Meerut", lang: "hi", phone: "9876543214" },
+    "303302": { name: "Anita Sharma", district: "Meerut", lang: "hi", phone: "9876543215" },
   },
   locations: {
     Thanjavur: [
@@ -50,7 +50,7 @@ function audioCtx() {
     const Ctx = window.AudioContext || window.webkitAudioContext;
     if (Ctx) audioContext = new Ctx();
   }
-  if (audioContext?.state === "suspended") audioContext.resume().catch(() => {});
+  if (audioContext?.state === "suspended") audioContext.resume().catch(() => { });
   return audioContext;
 }
 
@@ -80,7 +80,7 @@ function tone(key, special = false) {
       osc.start(now);
       osc.stop(now + 0.18);
     }
-  } catch (_) {}
+  } catch (_) { }
 }
 
 // Every speech request gets a generation id. This prevents an old Hindi/Tamil/
@@ -88,7 +88,7 @@ function tone(key, special = false) {
 // or disconnected the call.
 function stopSpeech() {
   speechGeneration += 1;
-  try { window.speechSynthesis?.cancel(); } catch (_) {}
+  try { window.speechSynthesis?.cancel(); } catch (_) { }
   if (currentAudio) {
     try {
       currentAudio.onended = null;
@@ -97,7 +97,7 @@ function stopSpeech() {
       currentAudio.currentTime = 0;
       currentAudio.removeAttribute("src");
       currentAudio.load();
-    } catch (_) {}
+    } catch (_) { }
     currentAudio = null;
   }
   if (currentUtterance) {
@@ -183,7 +183,7 @@ export default function App() {
   const [log, setLog] = useState([]);
   const [seconds, setSeconds] = useState(0);
   const [backendOnline, setBackendOnline] = useState(null);
-  const session = useRef({ lang: null, farmerId: "", farmer: null, locations: [] });
+  const session = useRef({ lang: null, farmerId: "", farmer: null, locations: [], callerPhone: "" });
   const promptTimer = useRef(null);
   const busy = useRef(false);
 
@@ -246,13 +246,27 @@ export default function App() {
     tone("CALL", true);
     clearTimeout(promptTimer.current);
     stopSpeech();
-    session.current = { lang: null, farmerId: "", farmer: null, locations: [] };
+    // Simulator-only caller identity. In a real IVR this value comes from the
+    // incoming call metadata supplied by the telecom provider.
+    const callerPhone = window.prompt(
+      "SIMULATED CALLER PHONE\n\nEnter the registered 10-digit phone number for this demo:",
+      "9876543210"
+    );
+    if (callerPhone === null) return;
+    const normalizedPhone = callerPhone.replace(/\D/g, "");
+    if (!/^\d{10}$/.test(normalizedPhone)) {
+      window.alert("Please enter a valid 10-digit caller phone number.");
+      return;
+    }
+
+    session.current = { lang: null, farmerId: "", farmer: null, locations: [], callerPhone: normalizedPhone };
     setLog([]);
     setBuffer("");
     setSeconds(0);
     setBackendOnline(null);
     setFlow("LANG_SELECT");
     logMessage("system", "CALL CONNECTED — keypad IVR session started.");
+    logMessage("system", `Caller phone verified for simulation: ${normalizedPhone}`);
 
     // Strictly serialize the three language announcements. A cancelled
     // announcement can no longer resume and speak in the wrong language.
@@ -311,14 +325,38 @@ export default function App() {
     stopSpeech();
     setScreenText(lang === "ta" ? `விவசாயி அடையாள எண் ${id.split("").join(" ")} சரிபார்க்கப்படுகிறது.` : lang === "hi" ? `किसान आईडी ${id} की जांच की जा रही है।` : `Verifying Farmer ID ${id}.`);
     logMessage("you", `Farmer ID: ${id} #`);
-    let farmer = await apiGet(`${API}/farmers/${encodeURIComponent(id)}`);
-    if (!farmer) farmer = MOCK_DB.farmers[id];
+    // Authentication requires BOTH the Farmer ID and the caller's registered phone.
+    let authFarmer = null;
+    try {
+      const res = await fetch(`${API}/authenticate/${encodeURIComponent(id)}?phone=${encodeURIComponent(session.current.callerPhone)}`);
+      setBackendOnline(true);
+      if (res.ok) {
+        const data = await res.json();
+        authFarmer = data.farmer;
+      }
+    } catch (_) {
+      setBackendOnline(false);
+    }
+
+    // Keep the local demo working when the backend is offline, but enforce the
+    // exact same phone + Farmer ID check against the simulator's mock data.
+    if (!authFarmer) {
+      const mockFarmer = MOCK_DB.farmers[id];
+      if (mockFarmer && mockFarmer.phone === session.current.callerPhone) authFarmer = mockFarmer;
+    }
+
     busy.current = false;
-    if (!farmer) {
+    if (!authFarmer) {
       setFlow("ID_ENTRY");
-      say(p.idInvalid);
+      say(lang === "ta"
+        ? "உங்கள் தொலைபேசி எண்ணும் விவசாயி அடையாள எண்ணும் பொருந்தவில்லை. மீண்டும் முயற்சி செய்யவும்."
+        : lang === "hi"
+          ? "आपका मोबाइल नंबर और किसान आईडी मेल नहीं खाते। कृपया फिर से प्रयास करें।"
+          : "The caller phone number and Farmer ID do not match. Please try again.");
       return;
     }
+
+    const farmer = authFarmer;
     session.current.farmerId = id;
     session.current.farmer = farmer;
     setBuffer("");
@@ -493,7 +531,16 @@ export default function App() {
           <div className="voice-card"><div className="voice-icon">🔊</div><div><b>{soundStatus}</b><span>Microsoft neural voice first; browser fallback second</span></div></div>
           <button className="test-voice" onClick={() => speak("வணக்கம். இது விவசாயிகள் கொள்முதல் உதவி மையத்தின் தமிழ் குரல் சோதனை. உங்கள் முன்பதிவு, டோக்கன் மற்றும் வரிசை நிலை தகவல்களை தெளிவாக கேட்கலாம்.", "ta-IN", setSoundStatus)}>▶ Test premium Tamil voice</button>
           <div className="transcript">{log.length === 0 ? <div className="empty-log">Press the green call button to start a real IVR-style demo.</div> : log.map((item, i) => <div className={`log-line ${item.who}`} key={i}><div className="log-meta">{item.who === "you" ? "CALLER" : "IVR"} · {item.at}</div><div>{item.text}</div></div>)}</div>
-          <div className="demo-info"><div><b>Demo IDs</b><span>101101 Tamil • 202201 English • 303301 Hindi</span></div><div><b>Flow</b><span>Language → Farmer ID → Confirm → Main Menu → Booking / Preview / Queue</span></div><div><b>Controls</b><span>Keyboard works too: 1–9, *, #, C = Call, Esc = End</span></div></div>
+          <div className="demo-info"><div><b>Demo IDs</b><span>
+            Demo numbers<br />
+            Farmer ID&nbsp;&nbsp;&nbsp;&nbsp;Registered phone<br/>
+            101101&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;9876543210<br/>
+            101102&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;9876543211<br/>
+            202201&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;9876543212<br/>
+            202202&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;9876543213<br/>
+            303301&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;9876543214<br/>
+            303302&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;9876543215
+          </span></div><div><b>Flow</b><span>Language → Farmer ID → Confirm → Main Menu → Booking / Preview / Queue</span></div><div><b>Controls</b><span>Keyboard works too: 1–9, *, #, C = Call, Esc = End</span></div></div>
         </aside>
       </main>
     </div>

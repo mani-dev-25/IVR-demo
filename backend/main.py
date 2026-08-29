@@ -110,7 +110,27 @@ async def validate_farmer(farmer_id: str):
     farmer = await db.farmers.find_one({"_id": farmer_id})
     if not farmer:
         raise HTTPException(status_code=404, detail="Farmer ID not found")
-    return farmer
+    # The phone number is deliberately not returned here. Authentication is
+    # performed through the dedicated endpoint below.
+    safe_farmer = {k: v for k, v in farmer.items() if k != "phone"}
+    return safe_farmer
+
+
+@app.get("/api/authenticate/{farmer_id}")
+async def authenticate_farmer(
+    farmer_id: str,
+    phone: str = Query(..., min_length=10, max_length=15),
+):
+    """Verify that the simulated caller is using the phone registered to the Farmer ID."""
+    normalized_phone = "".join(ch for ch in phone if ch.isdigit())
+    farmer = await db.farmers.find_one({"_id": farmer_id})
+    if not farmer or farmer.get("phone") != normalized_phone:
+        raise HTTPException(status_code=403, detail="Phone number is not registered for this Farmer ID")
+
+    return {
+        "authenticated": True,
+        "farmer": {k: v for k, v in farmer.items() if k != "phone"},
+    }
 
 
 # ---------- 2a. nearby locations for booking ----------

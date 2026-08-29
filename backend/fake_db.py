@@ -59,12 +59,12 @@ class FakeCollection:
 class FakeDB:
     def __init__(self):
         self.farmers = FakeCollection({
-            "101101": {"name": "S. Murugan",  "district": "Thanjavur",  "lang": "ta"},
-            "101102": {"name": "K. Lakshmi",  "district": "Thanjavur",  "lang": "ta"},
-            "202201": {"name": "R. Suresh",   "district": "Coimbatore", "lang": "en"},
-            "202202": {"name": "Priya Anand", "district": "Coimbatore", "lang": "en"},
-            "303301": {"name": "Suresh Kumar Yadav", "district": "Meerut", "lang": "hi"},
-            "303302": {"name": "Anita Sharma",       "district": "Meerut", "lang": "hi"},
+            "101101": {"name": "S. Murugan",  "district": "Thanjavur",  "lang": "ta", "phone": "9876543210"},
+            "101102": {"name": "K. Lakshmi",  "district": "Thanjavur",  "lang": "ta", "phone": "9876543211"},
+            "202201": {"name": "R. Suresh",   "district": "Coimbatore", "lang": "en", "phone": "9876543212"},
+            "202202": {"name": "Priya Anand", "district": "Coimbatore", "lang": "en", "phone": "9876543213"},
+            "303301": {"name": "Suresh Kumar Yadav", "district": "Meerut", "lang": "hi", "phone": "9876543214"},
+            "303302": {"name": "Anita Sharma",       "district": "Meerut", "lang": "hi", "phone": "9876543215"},
         })
 
         self.locations = FakeCollection({
